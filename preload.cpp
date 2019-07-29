@@ -53,11 +53,15 @@ const std::string SNAPCRAFT_LIBNAME = SNAPCRAFT_LIBNAME_DEF;
 const std::string SNAPCRAFT_PRELOAD = "SNAPCRAFT_PRELOAD";
 const std::string LD_PRELOAD = "LD_PRELOAD";
 const std::string LD_LINUX = "/lib/ld-linux.so.2";
+#if 0
 const std::string DEFAULT_VARLIB = "/var/lib";
+#endif
 const std::string DEFAULT_DEVSHM = "/dev/shm/";
 
 std::string saved_snapcraft_preload;
+#if 0
 std::string saved_varlib;
+#endif
 std::string saved_snap_name;
 std::string saved_snap_revision;
 std::string saved_snap_devshm;
@@ -107,18 +111,23 @@ Initializer::Initializer()
     // propagate the values to an exec'd program.
     std::string const& ld_preload = getenv_string (LD_PRELOAD);
     if (ld_preload.empty ()) {
+        std::cerr << "snapcraft-preload: Initializer bailing on empty LD_PRELOAD\n";
         return;
     }
 
     saved_snapcraft_preload = getenv_string (SNAPCRAFT_PRELOAD);
     if (saved_snapcraft_preload.empty ()) {
+        std::cerr << "snapcraft-preload: Initializer bailing on empty SNAPCRAFT_PRELOAD\n";
         return;
     }
 
+#if 0
     saved_varlib = getenv_string ("SNAP_DATA");
+#endif
     saved_snap_name = getenv_string ("SNAP_NAME");
     saved_snap_revision = getenv_string ("SNAP_REVISION");
     saved_snap_devshm = DEFAULT_DEVSHM + "snap." + saved_snap_name;
+    std::cerr << "snapcraft-preload: Initializer saved_snap_devshm: "<< saved_snap_devshm << "\n";
 
     // Pull out each absolute-pathed libsnapcraft-preload.so we find.  Better to
     // accidentally include some other libsnapcraft-preload than not propagate
@@ -128,6 +137,7 @@ Initializer::Initializer()
     while (std::getline (ss, p, ':')) {
         if (str_ends_with (p, "/" SNAPCRAFT_LIBNAME_DEF)) {
             saved_ld_preloads.push_back (p);
+	    std::cerr << "snapcraft-preload: Initializer saving off " << p << "\n";
         }
     }
 }
@@ -142,6 +152,7 @@ string_length_sanitize(std::string& path)
     }
 }
 
+#if 0
 std::string
 redirect_writable_path (std::string const& pathname, std::string const& basepath)
 {
@@ -160,6 +171,7 @@ redirect_writable_path (std::string const& pathname, std::string const& basepath
 
     return redirected_pathname;
 }
+#endif
 
 std::string
 redirect_path_full (std::string const& pathname, bool check_parent, bool only_if_absolute)
@@ -177,6 +189,7 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
         return pathname;
     }
 
+#if 0
     // And each app should have its own /var/lib writable tree.  Here, we want
     // to support reading the base system's files if they exist, else let the app
     // play in /var/lib themselves.  So we reverse the normal check: first see if
@@ -188,18 +201,27 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
             return pathname;
         }
     }
+#endif
+
+    std::cerr << "snapcraft-preload: intercepted "<< pathname << "\n";
 
     // Some apps want to open shared memory in random locations. Here we will confine it to the
     // snaps allowed path.
     std::string redirected_pathname;
 
-    if (str_starts_with (pathname, DEFAULT_DEVSHM) && !str_starts_with (pathname, saved_snap_devshm)) {
+    if (str_starts_with (pathname, DEFAULT_DEVSHM) && !str_starts_with (pathname, saved_snap_devshm) && 
+       (pathname.length() > DEFAULT_DEVSHM.length())) {
         std::string new_pathname = pathname.substr(DEFAULT_DEVSHM.size());
         redirected_pathname = saved_snap_devshm + '.' + new_pathname;
         string_length_sanitize (redirected_pathname);
+        std::cerr << "snapcraft-preload: [shm redirect] '" << pathname << " -> " << redirected_pathname << "\n";
         return redirected_pathname;
     }
 
+    std::cerr << "snapcraft-preload: [general ignore] '" << pathname << "\n";
+    return pathname;
+
+#if 0
     redirected_pathname = preload_dir;
     if (redirected_pathname.back () == '/') {
         redirected_pathname.resize(redirected_pathname.size ()-1);
@@ -209,6 +231,7 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
         std::string cwd;
         cwd.reserve(PATH_MAX);
         if (getcwd (const_cast<char*>(cwd.data ()), PATH_MAX) == NULL) {
+            std::cerr << "snapcraft-preload: [cwd ignore] '" << pathname << "\n";
             return pathname;
         }
 
@@ -233,10 +256,13 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
 
     if (ret == 0 || errno == ENOTDIR) { // ENOTDIR is OK because it exists at least
         string_length_sanitize (redirected_pathname);
+        std::cerr << "snapcraft-preload: [general redirect] '" << pathname << " -> " << redirected_pathname << "\n";
         return redirected_pathname;
     } else {
+        std::cerr << "snapcraft-preload: [general ignore] '" << pathname << "\n";
         return pathname;
     }
+#endif
 }
 
 inline std::string
@@ -445,6 +471,7 @@ REDIRECT_2_5_AT(int, scandirat64, int, struct dirent64 ***, filter_function_t<st
 REDIRECT_1_2_AT(void *, dlopen, int);
 }
 
+#if 0
 static int
 socket_action (socket_action_t action, int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
@@ -492,6 +519,7 @@ connect (int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 
     return socket_action (_connect, sockfd, addr, addrlen);
 }
+#endif
 
 namespace
 {
