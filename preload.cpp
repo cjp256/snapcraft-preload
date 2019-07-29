@@ -47,6 +47,11 @@
 
 #define LITERAL_STRLEN(s) (sizeof (s) - 1)
 
+#define DEBUG 1
+#ifdef DEBUG
+#include <fstream>
+#endif
+
 namespace
 {
 const std::string SNAPCRAFT_LIBNAME = SNAPCRAFT_LIBNAME_DEF;
@@ -102,6 +107,40 @@ str_ends_with(const std::string& str, std::string const& sufix)
     return str.compare (str.size() - sufix.size (), sufix.size (), sufix) == 0;
 }
 
+inline void
+log(const std::string& msg)
+{
+#ifdef DEBUG
+    std::ofstream debug_log_file;
+    debug_log_file.open (getenv_string("SNAP_USER_DATA").append("/debug.log"), std::ofstream::out | std::ofstream::app);
+    debug_log_file << msg << "\n";
+    debug_log_file.close ();
+#endif
+}
+
+inline void
+log_redirect(const std::string& from, const std::string& to)
+{
+#ifdef DEBUG
+    std::ofstream debug_log_file;
+    debug_log_file.open (getenv_string("SNAP_USER_DATA").append("/debug.log"), std::ofstream::out | std::ofstream::app);
+    debug_log_file << "redirecting: " << from << " -> " << to << "\n";
+    debug_log_file.close ();
+#endif
+}
+
+inline void
+log_intercept(const std::string& path)
+{
+#ifdef DEBUG
+    std::ofstream debug_log_file;
+    debug_log_file.open (getenv_string("SNAP_USER_DATA").append("/debug.log"), std::ofstream::out | std::ofstream::app);
+    debug_log_file << "intercepted: " << path << "\n";
+    debug_log_file.close ();
+#endif
+}
+
+
 struct Initializer { Initializer (); };
 static Initializer initalizer;
 
@@ -113,13 +152,17 @@ Initializer::Initializer()
     // propagate the values to an exec'd program.
     std::string const& ld_preload = getenv_string (LD_PRELOAD);
     if (ld_preload.empty ()) {
+#ifdef DEBUG
         std::cerr << "snapcraft-preload: Initializer bailing on empty LD_PRELOAD\n";
+#endif
         return;
     }
 
     saved_snapcraft_preload = getenv_string (SNAPCRAFT_PRELOAD);
     if (saved_snapcraft_preload.empty ()) {
+#ifdef DEBUG
         std::cerr << "snapcraft-preload: Initializer bailing on empty SNAPCRAFT_PRELOAD\n";
+#endif
         return;
     }
 
@@ -129,7 +172,10 @@ Initializer::Initializer()
     saved_snap_name = getenv_string ("SNAP_NAME");
     saved_snap_revision = getenv_string ("SNAP_REVISION");
     saved_snap_devshm = DEFAULT_DEVSHM + "snap." + saved_snap_name;
+
+#ifdef DEBUG
     std::cerr << "snapcraft-preload: Initializer saved_snap_devshm: "<< saved_snap_devshm << "\n";
+#endif
 
     // Pull out each absolute-pathed libsnapcraft-preload.so we find.  Better to
     // accidentally include some other libsnapcraft-preload than not propagate
@@ -178,6 +224,8 @@ redirect_writable_path (std::string const& pathname, std::string const& basepath
 std::string
 redirect_path_full (std::string const& pathname, bool check_parent, bool only_if_absolute)
 {
+    log_intercept(pathname);
+
     if (pathname.empty ()) {
         return pathname;
     }
@@ -205,8 +253,6 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
     }
 #endif
 
-    std::cerr << "snapcraft-preload: intercepted "<< pathname << "\n";
-
     // Some apps want to open shared memory in random locations. Here we will confine it to the
     // snaps allowed path.
     std::string redirected_pathname;
@@ -222,11 +268,11 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
             redirected_pathname = saved_snap_devshm + '.' + new_pathname;
             string_length_sanitize (redirected_pathname);
         }
-        std::cerr << "snapcraft-preload: [shm redirect] '" << pathname << " -> " << redirected_pathname << "\n";
+
+        log_redirect(pathname, redirected_pathname);
         return redirected_pathname;
     }
 
-    std::cerr << "snapcraft-preload: [general ignore] '" << pathname << "\n";
     return pathname;
 
 #if 0
