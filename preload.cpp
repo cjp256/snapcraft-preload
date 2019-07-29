@@ -269,7 +269,9 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
             string_length_sanitize (redirected_pathname);
         }
 
-        log_redirect(pathname, redirected_pathname);
+        if (pathname.compare(redirected_pathname) != 0) {
+            log_redirect(pathname, redirected_pathname);
+        }
         return redirected_pathname;
     }
 
