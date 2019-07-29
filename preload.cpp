@@ -47,17 +47,31 @@
 
 #define LITERAL_STRLEN(s) (sizeof (s) - 1)
 
+#define PRELOAD_DEBUG
+#ifdef PRELOAD_DEBUG
+#define debug_print(fmt, ...) \
+        do { \
+                fprintf(stderr, "%s:%d:%s(): " fmt, __FILE__, \
+                        __LINE__, __FUNCTION__, ## __VA_ARGS__); \
+        } while (0)
+#else
+#define debug_print(fmt, ...) \
+        do {} while (0)
+#endif
+
 namespace
 {
 const std::string SNAPCRAFT_LIBNAME = SNAPCRAFT_LIBNAME_DEF;
 const std::string SNAPCRAFT_PRELOAD = "SNAPCRAFT_PRELOAD";
 const std::string LD_PRELOAD = "LD_PRELOAD";
 const std::string LD_LINUX = "/lib/ld-linux.so.2";
-const std::string DEFAULT_VARLIB = "/var/lib";
+
 const std::string DEFAULT_DEVSHM = "/dev/shm/";
+const std::string SKYPE_DFLT_SHM_TMPFILE = "/dev/shm/.org.chromium.Chromium.";
+const std::string SKYPE_SNAP_SHM_TMPFILE = "/dev/shm/snap.skype.xx.Chromium.";
 
 std::string saved_snapcraft_preload;
-std::string saved_varlib;
+
 std::string saved_snap_name;
 std::string saved_snap_revision;
 std::string saved_snap_devshm;
@@ -71,7 +85,6 @@ using filter_function_t = int (*)(const dirent_t *);
 template <typename dirent_t>
 using compar_function_t = int (*)(const dirent_t **, const dirent_t **);
 
-using socket_action_t = int (*) (int, const struct sockaddr *, socklen_t);
 using execve_t = int (*) (const char *, char *const[], char *const[]);
 
 inline std::string
@@ -107,15 +120,16 @@ Initializer::Initializer()
     // propagate the values to an exec'd program.
     std::string const& ld_preload = getenv_string (LD_PRELOAD);
     if (ld_preload.empty ()) {
+        debug_print("LD_PRELOAD empty?\n");
         return;
     }
 
     saved_snapcraft_preload = getenv_string (SNAPCRAFT_PRELOAD);
     if (saved_snapcraft_preload.empty ()) {
+        debug_print("SNAPCRAFT_PRELOAD empty?\n");
         return;
     }
 
-    saved_varlib = getenv_string ("SNAP_DATA");
     saved_snap_name = getenv_string ("SNAP_NAME");
     saved_snap_revision = getenv_string ("SNAP_REVISION");
     saved_snap_devshm = DEFAULT_DEVSHM + "snap." + saved_snap_name;
@@ -128,6 +142,7 @@ Initializer::Initializer()
     while (std::getline (ss, p, ':')) {
         if (str_ends_with (p, "/" SNAPCRAFT_LIBNAME_DEF)) {
             saved_ld_preloads.push_back (p);
+            debug_print("saving off %s\n",  p.c_str());
         }
     }
 }
@@ -140,25 +155,6 @@ string_length_sanitize(std::string& path)
                   << "Expect undefined behavior";
         path.resize (PATH_MAX);
     }
-}
-
-std::string
-redirect_writable_path (std::string const& pathname, std::string const& basepath)
-{
-    if (pathname.empty ()) {
-        return pathname;
-    }
-
-    std::string redirected_pathname (basepath);
-
-    if (redirected_pathname.back () == '/' && pathname.back () == '/') {
-        redirected_pathname.resize (redirected_pathname.size () - 1);
-    }
-
-    redirected_pathname += pathname;
-    string_length_sanitize (redirected_pathname);
-
-    return redirected_pathname;
 }
 
 std::string
@@ -177,66 +173,23 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
         return pathname;
     }
 
-    // And each app should have its own /var/lib writable tree.  Here, we want
-    // to support reading the base system's files if they exist, else let the app
-    // play in /var/lib themselves.  So we reverse the normal check: first see if
-    // it exists in root, else do our redirection.
-    if (pathname == DEFAULT_VARLIB || str_starts_with (pathname, DEFAULT_VARLIB + '/')) {
-        if (!saved_varlib.empty () && !str_starts_with (pathname, saved_varlib) && _access (pathname.c_str(), F_OK) != 0) {
-            return redirect_writable_path (pathname.data () + DEFAULT_VARLIB.size (), saved_varlib);
-        } else {
-            return pathname;
-        }
-    }
-
     // Some apps want to open shared memory in random locations. Here we will confine it to the
     // snaps allowed path.
-    std::string redirected_pathname;
+    if (str_starts_with (pathname, DEFAULT_DEVSHM) && !str_starts_with (pathname, saved_snap_devshm) && (pathname.length() > DEFAULT_DEVSHM.length())) {
+        std::string redirected_pathname(pathname);
 
-    if (str_starts_with (pathname, DEFAULT_DEVSHM) && !str_starts_with (pathname, saved_snap_devshm)) {
-        std::string new_pathname = pathname.substr(DEFAULT_DEVSHM.size());
-        redirected_pathname = saved_snap_devshm + '.' + new_pathname;
-        string_length_sanitize (redirected_pathname);
+        if (str_starts_with (pathname, SKYPE_DFLT_SHM_TMPFILE )) {
+            redirected_pathname.replace(0, SKYPE_SNAP_SHM_TMPFILE.length(), SKYPE_SNAP_SHM_TMPFILE);
+        } else {
+            std::string new_pathname = pathname.substr(DEFAULT_DEVSHM.size());
+            redirected_pathname = saved_snap_devshm + '.' + new_pathname;
+            string_length_sanitize (redirected_pathname);
+        }
+
         return redirected_pathname;
     }
 
-    redirected_pathname = preload_dir;
-    if (redirected_pathname.back () == '/') {
-        redirected_pathname.resize(redirected_pathname.size ()-1);
-    }
-
-    if (pathname[0] != '/') {
-        std::string cwd;
-        cwd.reserve(PATH_MAX);
-        if (getcwd (const_cast<char*>(cwd.data ()), PATH_MAX) == NULL) {
-            return pathname;
-        }
-
-        redirected_pathname += cwd + '/';
-    }
-
-    redirected_pathname += pathname;
-    size_t slash_pos = std::string::npos;
-
-    if (check_parent) {
-        slash_pos = redirected_pathname.find_last_of ('/');
-        if (slash_pos != std::string::npos) { // should always be true
-            redirected_pathname[slash_pos] = 0;
-        }
-    }
-
-    int ret = _access (redirected_pathname.c_str (), F_OK);
-
-    if (check_parent && slash_pos != std::string::npos) {
-        redirected_pathname[slash_pos] = '/';
-    }
-
-    if (ret == 0 || errno == ENOTDIR) { // ENOTDIR is OK because it exists at least
-        string_length_sanitize (redirected_pathname);
-        return redirected_pathname;
-    } else {
-        return pathname;
-    }
+    return pathname;
 }
 
 inline std::string
@@ -290,15 +243,72 @@ redirect_n(Ts... as)
     const char *path = std::get<PATH_IDX>(tpl);
     static std::function<R(Ts...)> func (reinterpret_cast<R(*)(Ts...)> (dlsym (RTLD_NEXT, FUNC_NAME)));
 
-    if (path != NULL) {
-        std::string const& new_path = REDIRECT_PATH_TYPE::redirect (path);
-        std::get<PATH_IDX>(tpl) = new_path.c_str ();
-        R result = call_with_tuple_args (func, tpl);
-        std::get<PATH_IDX>(tpl) = path;
-        return result;
+    if (path == NULL) {
+        return func (std::forward<Ts>(as)...);
     }
 
-    return func (std::forward<Ts>(as)...);
+    std::string orig_path(path);
+    std::string new_path = REDIRECT_PATH_TYPE::redirect (orig_path);
+
+    debug_print("path: %s\n", path);
+
+    if (new_path.compare(orig_path) == 0) {
+        return func (std::forward<Ts>(as)...);
+    }
+
+    std::get<PATH_IDX>(tpl) = new_path.c_str ();
+
+    debug_print("[pre-call] func=%s path=%s\n", FUNC_NAME, new_path.c_str());
+
+    R result = call_with_tuple_args (func, tpl);
+
+    debug_print("[n post-call] func=%s path=%s ret=0x%lx\n", FUNC_NAME, new_path.c_str(), (long) result);
+
+    std::get<PATH_IDX>(tpl) = path;
+    return result;
+}
+
+template<typename R, const char *FUNC_NAME, typename REDIRECT_PATH_TYPE, size_t PATH_IDX, typename... Ts>
+inline R
+redirect_n_nonconst_path(Ts... as)
+{
+    std::tuple<Ts...> tpl(as...);
+    char *path = std::get<PATH_IDX>(tpl);
+    static std::function<R(Ts...)> func (reinterpret_cast<R(*)(Ts...)> (dlsym (RTLD_NEXT, FUNC_NAME)));
+
+    if (path == NULL) {
+        return func (std::forward<Ts>(as)...);
+    }
+
+    char *buf = NULL;
+    size_t path_len = strlen(path);
+    std::string const& new_path = REDIRECT_PATH_TYPE::redirect (path);
+
+    // Allocate writeable buffer, but only if sizes match.
+    if (new_path.length() == path_len) {
+        buf = strdup(new_path.c_str());
+        if (buf) {
+            std::get<PATH_IDX>(tpl) = buf;
+        } else {
+            std::cerr << "snapcraft-preload: failed to strdup for path=" << path << "\n";
+        }
+    } else {
+        std::cerr << "snapcraft-preload: failed to redirect path=" << path << " -> " << new_path << "\n";
+    }
+
+    debug_print("[pre-call] func=%s path=%s\n", FUNC_NAME, new_path.c_str());
+
+    R result = call_with_tuple_args (func, tpl);
+
+    debug_print("[post-call] func=%s path=%s ret=0x%lx\n", FUNC_NAME, new_path.c_str(), (long) result);
+
+    if (buf) {
+        strncpy(path, buf, path_len);
+        std::get<PATH_IDX>(tpl) = path;
+        free(buf);
+    }
+
+    return result;
 }
 
 template<typename R, const char *FUNC_NAME, typename REDIRECT_PATH_TYPE, typename REDIRECT_TARGET_TYPE, typename... Ts>
@@ -333,6 +343,10 @@ extern "C"
 #define DECLARE_REDIRECT(NAME) \
 constexpr const char REDIRECT_NAME(NAME)[] = #NAME;
 
+#define REDIRECT_1_NONCONST_PATH(RET, NAME, REDIR_TYPE, SIG, ARGS) \
+DECLARE_REDIRECT(NAME) \
+RET NAME (char *path SIG) { return redirect_n_nonconst_path<RET, REDIRECT_NAME(NAME), REDIR_TYPE, 0>(path ARGS); }
+
 #define REDIRECT_1(RET, NAME, REDIR_TYPE, SIG, ARGS) \
 DECLARE_REDIRECT(NAME) \
 RET NAME (const char *path SIG) { return redirect_n<RET, REDIRECT_NAME(NAME), REDIR_TYPE, 0>(path ARGS); }
@@ -347,6 +361,9 @@ RET NAME (T1 a1, T2 a2, const char *path SIG) { return redirect_n<RET, REDIRECT_
 
 #define REDIRECT_1_1(RET, NAME) \
 REDIRECT_1(RET, NAME, NORMAL_REDIRECT, ,)
+
+#define REDIRECT_1_1_NONCONST_PATH(RET, NAME) \
+REDIRECT_1_NONCONST_PATH(RET, NAME, NORMAL_REDIRECT, ,)
 
 #define REDIRECT_1_2(RET, NAME, T2) \
 REDIRECT_1(RET, NAME, NORMAL_REDIRECT, ARG(T2 a2), ARG(a2))
@@ -439,58 +456,12 @@ REDIRECT_1_4(int, scandir, struct dirent ***, filter_function_t<struct dirent>, 
 REDIRECT_1_4(int, scandir64, struct dirent64 ***, filter_function_t<struct dirent64>, compar_function_t<struct dirent64>);
 REDIRECT_2_5_AT(int, scandirat, int, struct dirent ***, filter_function_t<struct dirent>, compar_function_t<struct dirent>);
 REDIRECT_2_5_AT(int, scandirat64, int, struct dirent64 ***, filter_function_t<struct dirent64>, compar_function_t<struct dirent64>);
+REDIRECT_1_1_NONCONST_PATH(int, mkstemp)
+REDIRECT_1_1_NONCONST_PATH(int, mkstemp64)
 
 // non-absolute library paths aren't simply relative paths, they need
 // a whole lookup algorithm
 REDIRECT_1_2_AT(void *, dlopen, int);
-}
-
-static int
-socket_action (socket_action_t action, int sockfd, const struct sockaddr *addr, socklen_t addrlen)
-{
-    const struct sockaddr_un *un_addr = (const struct sockaddr_un *)addr;
-
-    if (addr->sa_family != AF_UNIX) {
-        // Non-unix sockets
-        return action (sockfd, addr, addrlen);
-    }
-
-    if (!un_addr->sun_path || un_addr->sun_path[0] == '\0') {
-        // Abstract sockets
-        return action (sockfd, addr, addrlen);
-    }
-
-    int result = 0;
-    std::string const& new_path = redirect_path (un_addr->sun_path);
-
-    if (new_path.compare (0, PATH_MAX, un_addr->sun_path) == 0) {
-        result = action (sockfd, addr, addrlen);
-    } else {
-        struct sockaddr_un new_addr = {0};
-        strncpy (new_addr.sun_path, new_path.c_str (), new_path.size ());
-        new_addr.sun_path[new_path.size ()] = '\0';
-        result = action (sockfd, (const struct sockaddr *) &new_addr, sizeof (new_addr));
-    }
-
-    return result;
-}
-
-extern "C" int
-bind (int sockfd, const struct sockaddr *addr, socklen_t addrlen)
-{
-    static socket_action_t _bind =
-        (decltype(_bind)) dlsym (RTLD_NEXT, "bind");
-
-    return socket_action (_bind, sockfd, addr, addrlen);
-}
-
-extern "C" int
-connect (int sockfd, const struct sockaddr *addr, socklen_t addrlen)
-{
-    static socket_action_t _connect =
-        (decltype(_connect)) dlsym (RTLD_NEXT, "connect");
-
-    return socket_action (_connect, sockfd, addr, addrlen);
 }
 
 namespace
@@ -563,29 +534,9 @@ struct c_vector_holder
 };
 
 int
-execve32_wrapper (execve_t _execve, const std::string& path, char *const argv[], char *const envp[])
-{
-    std::string const& custom_loader = redirect_path (LD_LINUX);
-    if (custom_loader == LD_LINUX) {
-        return 0;
-    }
-
-    std::vector<std::string> new_argv;
-    new_argv.push_back (path);
-
-    // envp is already adjusted for our needs.  But we need to shift argv
-    for (unsigned i = 0; argv && argv[i]; ++i) {
-        new_argv.push_back (argv[i]);
-    }
-
-    // Now actually run execve with our loader and adjusted argv
-    return _execve (custom_loader.c_str (), c_vector_holder (new_argv), envp);
-}
-
-int
 execve_wrapper (const char *func, const char *path, char *const argv[], char *const envp[])
 {
-    int i, result;
+    int result;
 
     static execve_t _execve = (decltype(_execve)) dlsym (RTLD_NEXT, func);
 
@@ -600,24 +551,6 @@ execve_wrapper (const char *func, const char *path, char *const argv[], char *co
     auto env_copy = execve_copy_envp (envp);
     c_vector_holder new_envp (env_copy);
     result = _execve (new_path.c_str (), argv, new_envp);
-
-    if (result == -1 && errno == ENOENT) {
-        // OK, get prepared for gross hacks here.  In order to run 32-bit ELF
-        // executables -- which will hardcode /lib/ld-linux.so.2 as their ld.so
-        // loader, we must redirect that check to our own version of ld-linux.so.2.
-        // But that lookup is done behind the scenes by execve, so we can't
-        // intercept it like normal.  Instead, we'll prefix the command by the
-        // ld.so loader which will only work if the architecture matches.  So if
-        // we failed to run it normally above because the loader couldn't find
-        // something, try with our own 32-bit loader.
-        if (_access (new_path.c_str (), F_OK) == 0) {
-            // Only actually try this if the path actually did exist.  That
-            // means the ENOENT must have been a missing linked library or the
-            // wrong ld.so loader.  Lets assume the latter and try to run as
-            // a 32-bit executable.
-            result = execve32_wrapper (_execve, new_path, argv, new_envp);
-        }
-    }
 
     return result;
 }
