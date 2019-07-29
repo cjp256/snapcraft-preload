@@ -57,6 +57,8 @@ const std::string LD_LINUX = "/lib/ld-linux.so.2";
 const std::string DEFAULT_VARLIB = "/var/lib";
 #endif
 const std::string DEFAULT_DEVSHM = "/dev/shm/";
+const std::string SKYPE_DFLT_SHM_TMPFILE = "/dev/shm/.org.chromium.Chromium.";
+const std::string SKYPE_SNAP_SHM_TMPFILE = "/dev/shm/snap.skype.xx.Chromium.";
 
 std::string saved_snapcraft_preload;
 #if 0
@@ -209,11 +211,17 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
     // snaps allowed path.
     std::string redirected_pathname;
 
-    if (str_starts_with (pathname, DEFAULT_DEVSHM) && !str_starts_with (pathname, saved_snap_devshm) && 
+    if (str_starts_with (pathname, DEFAULT_DEVSHM) && !str_starts_with (pathname, saved_snap_devshm) &&
        (pathname.length() > DEFAULT_DEVSHM.length())) {
-        std::string new_pathname = pathname.substr(DEFAULT_DEVSHM.size());
-        redirected_pathname = saved_snap_devshm + '.' + new_pathname;
-        string_length_sanitize (redirected_pathname);
+
+        if (str_starts_with (pathname, SKYPE_DFLT_SHM_TMPFILE )) {
+            redirected_pathname = pathname;
+            redirected_pathname.replace(0, SKYPE_SNAP_SHM_TMPFILE.length(), SKYPE_SNAP_SHM_TMPFILE);
+        } else {
+            std::string new_pathname = pathname.substr(DEFAULT_DEVSHM.size());
+            redirected_pathname = saved_snap_devshm + '.' + new_pathname;
+            string_length_sanitize (redirected_pathname);
+        }
         std::cerr << "snapcraft-preload: [shm redirect] '" << pathname << " -> " << redirected_pathname << "\n";
         return redirected_pathname;
     }
