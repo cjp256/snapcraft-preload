@@ -47,7 +47,7 @@
 
 #define LITERAL_STRLEN(s) (sizeof (s) - 1)
 
-#define DEBUG 1
+//#define DEBUG 1
 #ifdef DEBUG
 #include <fstream>
 #endif
@@ -107,14 +107,41 @@ str_ends_with(const std::string& str, std::string const& sufix)
     return str.compare (str.size() - sufix.size (), sufix.size (), sufix) == 0;
 }
 
+#ifdef DEBUG
+
+//FILE *log_fd = NULL;
+
+inline int
+_log_init()
+{ 
+#if 0
+    FILE *log_fd = NULL;
+    if (log_fd >= 0) {
+        return;
+    }
+    
+    std::ostringstream lf_name;
+    lf_name << getenv_string("SNAP_USER_DATA") << "/debug.log";
+    return fopen(lf_name.str().c_str(), "a+");
+#endif
+    return STDERR_FILENO;
+}
+
+inline void
+_log_destroy(FILE *log_fd)
+{
+    fflush(log_fd);
+    fclose(log_fd);
+}
+#endif
+
 inline void
 log(const std::string& msg)
 {
 #ifdef DEBUG
-    std::ofstream debug_log_file;
-    debug_log_file.open (getenv_string("SNAP_USER_DATA").append("/debug.log"), std::ofstream::out | std::ofstream::app);
-    debug_log_file << msg << "\n";
-    debug_log_file.close ();
+    int log_fd = _log_init();
+    dprintf(log_fd, "%s\n", msg.c_str());
+    sync();
 #endif
 }
 
@@ -122,10 +149,10 @@ inline void
 log_redirect(const std::string& from, const std::string& to)
 {
 #ifdef DEBUG
-    std::ofstream debug_log_file;
-    debug_log_file.open (getenv_string("SNAP_USER_DATA").append("/debug.log"), std::ofstream::out | std::ofstream::app);
-    debug_log_file << "redirecting: " << from << " -> " << to << "\n";
-    debug_log_file.close ();
+    int log_fd = _log_init();
+    dprintf(log_fd, "redirecting: %s -> %s\n", from.c_str(), to.c_str());
+    sync();
+    //_log_destroy(lf);
 #endif
 }
 
@@ -133,13 +160,34 @@ inline void
 log_intercept(const std::string& path)
 {
 #ifdef DEBUG
-    std::ofstream debug_log_file;
-    debug_log_file.open (getenv_string("SNAP_USER_DATA").append("/debug.log"), std::ofstream::out | std::ofstream::app);
-    debug_log_file << "intercepted: " << path << "\n";
-    debug_log_file.close ();
+    int log_fd = _log_init();
+    dprintf(log_fd, "intercepted: %s\n", path.c_str());
+    sync();
+    //c_log_destroy();
 #endif
 }
 
+inline void
+log_pre_call(const char *func, const char *path)
+{
+#ifdef DEBUG
+    int log_fd = _log_init();
+    dprintf(log_fd, "calling: %s with: %s\n", func, path);
+    sync();
+    //_log_destroy(lf);
+#endif
+}
+
+inline void
+log_post_call(const char *func, const char *path, int ret)
+{
+#ifdef DEBUG
+    int log_fd = _log_init();
+    dprintf(log_fd, "called: %s with: %s with return code: %d\n", func, path, ret);
+    sync();
+    //_log_destroy(lf);
+#endif
+}
 
 struct Initializer { Initializer (); };
 static Initializer initalizer;
@@ -155,7 +203,7 @@ Initializer::Initializer()
 #ifdef DEBUG
         std::cerr << "snapcraft-preload: Initializer bailing on empty LD_PRELOAD\n";
 #endif
-        return;
+        //return;
     }
 
     saved_snapcraft_preload = getenv_string (SNAPCRAFT_PRELOAD);
@@ -163,7 +211,7 @@ Initializer::Initializer()
 #ifdef DEBUG
         std::cerr << "snapcraft-preload: Initializer bailing on empty SNAPCRAFT_PRELOAD\n";
 #endif
-        return;
+        //return;
     }
 
 #if 0
@@ -171,7 +219,7 @@ Initializer::Initializer()
 #endif
     saved_snap_name = getenv_string ("SNAP_NAME");
     saved_snap_revision = getenv_string ("SNAP_REVISION");
-    saved_snap_devshm = DEFAULT_DEVSHM + "snap." + saved_snap_name;
+    saved_snap_devshm = DEFAULT_DEVSHM + "snap." + getenv_string ("SNAP_NAME");
 
 #ifdef DEBUG
     std::cerr << "snapcraft-preload: Initializer saved_snap_devshm: "<< saved_snap_devshm << "\n";
@@ -269,9 +317,6 @@ redirect_path_full (std::string const& pathname, bool check_parent, bool only_if
             string_length_sanitize (redirected_pathname);
         }
 
-        if (pathname.compare(redirected_pathname) != 0) {
-            log_redirect(pathname, redirected_pathname);
-        }
         return redirected_pathname;
     }
 
@@ -375,7 +420,43 @@ redirect_n(Ts... as)
     if (path != NULL) {
         std::string const& new_path = REDIRECT_PATH_TYPE::redirect (path);
         std::get<PATH_IDX>(tpl) = new_path.c_str ();
+
+        log_pre_call(FUNC_NAME, new_path.c_str ());
         R result = call_with_tuple_args (func, tpl);
+        log_post_call(FUNC_NAME, new_path.c_str (), *(int *)&result);
+
+        std::get<PATH_IDX>(tpl) = path;
+        return result;
+    }
+
+    return func (std::forward<Ts>(as)...);
+}
+
+template<typename R, const char *FUNC_NAME, typename REDIRECT_PATH_TYPE, size_t PATH_IDX, typename... Ts>
+inline R
+redirect_n_nonconst_path(Ts... as)
+{
+    std::tuple<Ts...> tpl(as...);
+    char *path = std::get<PATH_IDX>(tpl);
+    static std::function<R(Ts...)> func (reinterpret_cast<R(*)(Ts...)> (dlsym (RTLD_NEXT, FUNC_NAME)));
+
+    if (path != NULL) {
+        ssize_t buf_len = strlen(path)+1;
+        char *buf = (char *)malloc(buf_len);
+
+        std::string const& new_path = REDIRECT_PATH_TYPE::redirect (path);
+        strncpy(buf, new_path.c_str(), buf_len);
+
+        std::get<PATH_IDX>(tpl) = buf;
+
+        log_pre_call(FUNC_NAME, new_path.c_str ());
+        R result = call_with_tuple_args (func, tpl);
+        log_post_call(FUNC_NAME, new_path.c_str (), *(int *)&result);
+
+        // size needs to be fixed
+        strncpy(path, buf, strlen(path));
+        free(buf);
+
         std::get<PATH_IDX>(tpl) = path;
         return result;
     }
@@ -415,6 +496,10 @@ extern "C"
 #define DECLARE_REDIRECT(NAME) \
 constexpr const char REDIRECT_NAME(NAME)[] = #NAME;
 
+#define REDIRECT_1_NONCONST_PATH(RET, NAME, REDIR_TYPE, SIG, ARGS) \
+DECLARE_REDIRECT(NAME) \
+RET NAME (char *path SIG) { return redirect_n_nonconst_path<RET, REDIRECT_NAME(NAME), REDIR_TYPE, 0>(path ARGS); }
+
 #define REDIRECT_1(RET, NAME, REDIR_TYPE, SIG, ARGS) \
 DECLARE_REDIRECT(NAME) \
 RET NAME (const char *path SIG) { return redirect_n<RET, REDIRECT_NAME(NAME), REDIR_TYPE, 0>(path ARGS); }
@@ -429,6 +514,9 @@ RET NAME (T1 a1, T2 a2, const char *path SIG) { return redirect_n<RET, REDIRECT_
 
 #define REDIRECT_1_1(RET, NAME) \
 REDIRECT_1(RET, NAME, NORMAL_REDIRECT, ,)
+
+#define REDIRECT_1_1_NONCONST_PATH(RET, NAME) \
+REDIRECT_1_NONCONST_PATH(RET, NAME, NORMAL_REDIRECT, ,)
 
 #define REDIRECT_1_2(RET, NAME, T2) \
 REDIRECT_1(RET, NAME, NORMAL_REDIRECT, ARG(T2 a2), ARG(a2))
@@ -521,6 +609,8 @@ REDIRECT_1_4(int, scandir, struct dirent ***, filter_function_t<struct dirent>, 
 REDIRECT_1_4(int, scandir64, struct dirent64 ***, filter_function_t<struct dirent64>, compar_function_t<struct dirent64>);
 REDIRECT_2_5_AT(int, scandirat, int, struct dirent ***, filter_function_t<struct dirent>, compar_function_t<struct dirent>);
 REDIRECT_2_5_AT(int, scandirat64, int, struct dirent64 ***, filter_function_t<struct dirent64>, compar_function_t<struct dirent64>);
+REDIRECT_1_1_NONCONST_PATH(int, mkstemp)
+REDIRECT_1_1_NONCONST_PATH(int, mkstemp64)
 
 // non-absolute library paths aren't simply relative paths, they need
 // a whole lookup algorithm
@@ -646,6 +736,7 @@ struct c_vector_holder
     std::vector<const char*> holder_;
 };
 
+#if 0
 int
 execve32_wrapper (execve_t _execve, const std::string& path, char *const argv[], char *const envp[])
 {
@@ -665,6 +756,7 @@ execve32_wrapper (execve_t _execve, const std::string& path, char *const argv[],
     // Now actually run execve with our loader and adjusted argv
     return _execve (custom_loader.c_str (), c_vector_holder (new_argv), envp);
 }
+#endif
 
 int
 execve_wrapper (const char *func, const char *path, char *const argv[], char *const envp[])
@@ -685,6 +777,7 @@ execve_wrapper (const char *func, const char *path, char *const argv[], char *co
     c_vector_holder new_envp (env_copy);
     result = _execve (new_path.c_str (), argv, new_envp);
 
+#if 0
     if (result == -1 && errno == ENOENT) {
         // OK, get prepared for gross hacks here.  In order to run 32-bit ELF
         // executables -- which will hardcode /lib/ld-linux.so.2 as their ld.so
@@ -702,6 +795,7 @@ execve_wrapper (const char *func, const char *path, char *const argv[], char *co
             result = execve32_wrapper (_execve, new_path, argv, new_envp);
         }
     }
+#endif
 
     return result;
 }
